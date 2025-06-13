@@ -1,11 +1,12 @@
 ###############################################################################
-# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（CLI 手動診断支援・v1.2）
+# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（CLI 手動診断支援・v1.3）
 #
-# 変更点 v1.2
-#   • --set-challenge 追加
-#       ─ "random" 指定で 32 byte 乱数を生成し Base64URL へ
-#       ─ 任意の Base64URL 文字列をそのまま設定することも可
-#   • rpIdHash 書き換え (--set-rpid) は内部で SHA‑256 を計算（前バージョン維持）
+# v1.3 変更点  ✧✧✧───────────────────────────────────────────────
+#   ▸ clientDataJSON と同様、**attestationObject / authenticatorData で
+#     何を操作したか** を必ず標準エラー出力にログするよう改良。
+#       • authData 内 rpIdHash / flags / counter 変更を詳細に表示
+#       • attestationObject に埋め戻しが発生した場合、その旨を表示
+#   ▸ 既存 v1.2 機能（--set-challenge, --set-rpid など）は維持
 #
 # 依存ライブラリ : Python ≥3.8 / pip install cbor2
 ###############################################################################
@@ -22,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 import cbor2  # pip install cbor2
 
 # ─────────────────────────────────────────────────────────────────────
-# Base64URL helper
+# Base64URL helpers
 # ─────────────────────────────────────────────────────────────────────
 def b64url_decode(inp: str) -> bytes:
     pad = "=" * (-len(inp) % 4)
@@ -132,7 +133,7 @@ def modify(
 ):
     new_client, new_authdata, new_att = client_b64, authdata_b64, att_b64
 
-    # --- clientDataJSON modifications ---
+    # ── clientDataJSON modifications ────────────────────────────────
     if client_b64 and (set_origin or set_challenge):
         cdj = decode_client(client_b64)
 
@@ -157,7 +158,8 @@ def modify(
 
         new_client = encode_client(cdj)
 
-    # --- authenticatorData modifications ---
+    # ── authenticatorData modifications ─────────────────────────────
+    rp_hash_changed = False
     if authdata_b64 and (
         clear_up
         or set_up
@@ -168,6 +170,7 @@ def modify(
     ):
         ad = decode_authdata(authdata_b64)
         orig_flags, orig_counter = ad.flags, ad.counter
+        orig_rp_hash = ad.rp_hash
 
         if clear_up:
             ad.flags &= ~FLAG_UP
@@ -180,29 +183,37 @@ def modify(
         if counter is not None:
             ad.counter = counter
         if set_rpid:
-            new_hash = hashlib.sha256(set_rpid.encode("utf-8")).digest()
+            ad.rp_hash = hashlib.sha256(set_rpid.encode("utf-8")).digest()
+            rp_hash_changed = True
+
+        # 出力ログ
+        if rp_hash_changed:
             print(
-                f"[authenticatorData] rpIdHash: {ad.rp_hash.hex()} -> {new_hash.hex()}",
+                f"[authenticatorData] rpIdHash: {orig_rp_hash.hex()} -> "
+                f"{ad.rp_hash.hex()}",
                 file=sys.stderr,
             )
-            ad.rp_hash = new_hash
-
         if (orig_flags != ad.flags) or (orig_counter != ad.counter):
             print(
-                f"[authenticatorData] flags 0x{orig_flags:02x}->{ad.flags:02x}, "
-                f"counter {orig_counter}->{ad.counter}",
+                f"[authenticatorData] flags 0x{orig_flags:02x} -> 0x{ad.flags:02x}, "
+                f"counter {orig_counter} -> {ad.counter}",
                 file=sys.stderr,
             )
 
         new_authdata = encode_authdata(ad)
 
-    # --- attestationObject update if needed ---
+    # ── attestationObject update & log ──────────────────────────────
     if att_b64 and new_authdata != authdata_b64:
         ao = decode_attobj(att_b64)
         ao["authData"] = b64url_decode(new_authdata)
         new_att = encode_attobj(ao)
+        print(
+            "[attestationObject] embedded authData replaced "
+            "(reflects authenticatorData changes)",
+            file=sys.stderr,
+        )
 
-    # --- build output payload ---
+    # ── output payload ─────────────────────────────────────────────
     kv = []
     if new_client:
         kv.append(f"clientDataJSON={new_client}")
@@ -225,23 +236,19 @@ def modify(
 # ─────────────────────────────────────────────────────────────────────
 def selftest():
     ok = True
-    # Base64URL round‑trip
     s = "aGVsbG8gd29ybGQ"
     ok &= b64url_encode(b64url_decode(s)) == s
 
-    # Flag operations
     dummy = b"\0" * 32 + b"\x05" + b"\0\0\0\x02"
     ad = decode_authdata(b64url_encode(dummy))
     ad.flags &= ~FLAG_UP
     ok &= not (decode_authdata(encode_authdata(ad)).flags & FLAG_UP)
 
-    # rpIdHash replacement
     ad2 = decode_authdata(b64url_encode(dummy))
     new_hash = hashlib.sha256(b"evil.example").digest()
     ad2.rp_hash = new_hash
     ok &= decode_authdata(encode_authdata(ad2)).rp_hash == new_hash
 
-    # challenge random
     rand = os.urandom(32)
     chal = b64url_encode(rand)
     ok &= len(chal) > 0 and "=" not in chal
@@ -257,13 +264,13 @@ def main():
     ap = argparse.ArgumentParser("WebAuthn message modifier")
     ap.add_argument("--client", help="Base64URL clientDataJSON")
     ap.add_argument("--authdata", help="Base64URL authenticatorData")
-    ap.add_argument("--attobj", help="Base64URL attestationObject (registration only)")
+    ap.add_argument("--attobj", help="Base64URL attestationObject (registration)")
 
     ap.add_argument("--set-origin", help="Rewrite clientDataJSON.origin")
     ap.add_argument(
         "--set-challenge",
         help='Rewrite clientDataJSON.challenge '
-        '(pass "random" for 32‑byte random value or Base64URL string)',
+        '(use "random" for 32‑byte random value or provide Base64URL)',
     )
     ap.add_argument(
         "--set-rpid",
