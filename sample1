@@ -1,72 +1,307 @@
-# 2025年 上期 業務目標
+###############################################################################
+# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（CLI 手動診断支援・v1.2）
+#
+# 変更点 v1.2
+#   • --set-challenge 追加
+#       ─ "random" 指定で 32 byte 乱数を生成し Base64URL へ
+#       ─ 任意の Base64URL 文字列をそのまま設定することも可
+#   • rpIdHash 書き換え (--set-rpid) は内部で SHA‑256 を計算（前バージョン維持）
+#
+# 依存ライブラリ : Python ≥3.8 / pip install cbor2
+###############################################################################
+import argparse
+import base64
+import hashlib
+import json
+import os
+import struct
+import sys
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
----
+import cbor2  # pip install cbor2
 
-## ■ AIを活用した業務効率化と支援体制の構築
+# ─────────────────────────────────────────────────────────────────────
+# Base64URL helper
+# ─────────────────────────────────────────────────────────────────────
+def b64url_decode(inp: str) -> bytes:
+    pad = "=" * (-len(inp) % 4)
+    return base64.urlsafe_b64decode(inp + pad)
 
-**概要：**  
-生成AI（ChatGPT等）を業務に活用するための社内基盤を、主担当として構築する。タスク管理と進捗統制を適切に行いながらPoCを推進し、活用結果をもとに正式な支援体制・ナレッジコンテンツの整備と社内展開を実施する。
 
-**目標（KPI）：**  
-- 月2回以上の進捗会議を開催し、議事録と次ステップを共有する  
-- 社内メンバー10名にPoC活用を実施し、有効なユースケースをナレッジ化する  
-- タスク完了率を80%以上で維持し、期日遵守を徹底する  
-- 活用ガイドを1セット整備し、社内説明会を実施（満足度80%以上）  
-- ナレッジ更新体制（フロー・窓口）を整備し、関係者に周知する
+def b64url_encode(buf: bytes) -> str:
+    return base64.urlsafe_b64encode(buf).decode().rstrip("=")
 
----
 
-## ■ PoCフェーズを経た新サービスの本格展開
+# ─────────────────────────────────────────────────────────────────────
+# clientDataJSON helpers
+# ─────────────────────────────────────────────────────────────────────
+def decode_client(b64: str) -> Dict[str, Any]:
+    return json.loads(b64url_decode(b64))
 
-**概要：**  
-PoCで得た知見をもとに新サービスを正式展開フェーズへ移行し、パートナー主体での実施体制とサービス品質を維持するための基盤を整備する。サービス運用に必要なドキュメントの整備および、パートナーの教育・品質管理体制を構築する。
 
-**目標（KPI）：**  
-- Gd/Gd＋レベル相当のパートナーを3名新規育成し、実施可能な状態を構築する  
-- 内部品質チェック（成果物レビュー・手順遵守）の新たな仕組みを導入し、安定運用を開始する
+def encode_client(obj: Dict[str, Any]) -> str:
+    return b64url_encode(json.dumps(obj, separators=(",", ":")).encode())
 
-**小目標（施策）：**  
-1. サービス運用に必要な各種ドキュメントを一式整備し、現場に展開する  
-2. パートナー3名に研修を実施し、うち1名以上にトライアル案件を担当させる  
-3. 案件実施状況と品質チェックのモニタリング体制を構築・運用する  
-4. プラチナ診断と同様のナレッジ共有の枠組みを活用し、定期的な振り返り・改善活動を実施する  
 
----
+# ─────────────────────────────────────────────────────────────────────
+# attestationObject helpers
+# ─────────────────────────────────────────────────────────────────────
+def decode_attobj(b64: str) -> Dict[str, Any]:
+    return cbor2.loads(b64url_decode(b64))
 
-## ■ 顧客課題解決に資するヒアリング・資料化能力の向上
 
-**概要：**  
-顧客ヒアリングから課題整理、提案資料作成までを一貫して遂行するスキルを強化する。  
-また、サブリーダーとしてメンバー育成に取り組むとともに、顧客課題の構造化スキルを高め、チーム全体としての提案品質の底上げに貢献する。
+def encode_attobj(obj: Dict[str, Any]) -> str:
+    return b64url_encode(cbor2.dumps(obj))
 
-**目標（KPI）：**  
-- ヒアリングを含む案件に3件以上関与し、2件以上で課題整理・提案資料作成を完了する  
-- 1件以上の案件において、提案から契約処理までの一連のプロセスを主担当として遂行する  
-- チームメンバー2名に対してOJT形式で案件同行・指導を実施し、うち1名以上が単独でヒアリングを実施できる状態に育成する
 
----
+# ─────────────────────────────────────────────────────────────────────
+# authenticatorData helpers
+# ─────────────────────────────────────────────────────────────────────
+@dataclass
+class AuthData:
+    rp_hash: bytes
+    flags: int
+    counter: int
+    acd: bytes
+    ext: bytes
 
-## ■ スキルレベル別育成モデルの設計と浸透
 
-**概要：**  
-既存の育成カリキュラムを見直し、脆弱性の仕組みから修正方法までを体系的に学べる実践的な内容へ再構成する。育成内容の定着と再利用可能な形での整理を通じて、中級診断者の育成モデルの標準化を進める。
+def _cbor_peek(buf: bytes) -> Tuple[Any, int]:
+    dec = cbor2.CBORDecoder(buf)
+    val = dec.decode()
+    return val, dec.tell()
 
-**目標（KPI）：**  
-- 再構成したカリキュラムを用いて1名以上の育成を実施・完了する  
-- 昨年度カリキュラムの改善点を洗い出し、再編後の構成を次回以降に適用可能な状態へ整備する
 
----
+def _split_authdata(buf: bytes) -> AuthData:
+    rp_hash = buf[0:32]
+    flags = buf[32]
+    counter = struct.unpack(">I", buf[33:37])[0]
+    rest = buf[37:]
 
-## ■ ベトナムチームでの診断業務体制の立ち上げ支援
+    # AT(0x40) present?
+    if flags & 0x40:
+        aaguid = rest[0:16]
+        cred_len = struct.unpack(">H", rest[16:18])[0]
+        cbor_start = 18 + cred_len
+        _, used = _cbor_peek(rest[cbor_start:])
+        acd_len = 16 + 2 + cred_len + used
+        acd = rest[:acd_len]
+        ext = rest[acd_len:]
+    else:
+        acd, ext = b"", rest
 
-**概要：**  
-ベトナムチームが診断業務を自立して遂行できるよう、業務フロー・役割分担・品質管理の枠組みを整備する。コンサルタントとしての立場から、現地状況を踏まえながら課題を自発的に捉え、主体的な提案・実行を通じて体制構築を支援する。
+    return AuthData(rp_hash, flags, counter, acd, ext)
 
-**目標（KPI）：**  
-- 診断業務の役割分担、業務フロー、品質管理手順をドキュメントとして整備・展開する  
-- 支援を通じて3件以上の現地課題を抽出し、改善提案〜導入までを主導する  
 
-**小目標（施策）：**  
-1. 現地チームとの協議を通じて業務フロー・役割分担図を作成・合意形成  
-2. 対応手順書・チェックリストを整備し、現地への展開・レクチャーを実施  
-3. エスカレーション・レビュー等の連携体制を設計し、現地での運用に反映する  
+def decode_authdata(b64: str) -> AuthData:
+    return _split_authdata(b64url_decode(b64))
+
+
+def encode_authdata(ad: AuthData) -> str:
+    parts = [
+        ad.rp_hash,
+        struct.pack("B", ad.flags),
+        struct.pack(">I", ad.counter),
+        ad.acd,
+        ad.ext,
+    ]
+    return b64url_encode(b"".join(parts))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# CLI modify routine
+# ─────────────────────────────────────────────────────────────────────
+FLAG_UP = 0x01
+FLAG_UV = 0x04
+
+
+def modify(
+    client_b64: Optional[str],
+    authdata_b64: Optional[str],
+    att_b64: Optional[str],
+    set_origin: Optional[str],
+    set_challenge: Optional[str],
+    set_rpid: Optional[str],
+    clear_up: bool,
+    set_up: bool,
+    clear_uv: bool,
+    set_uv: bool,
+    counter: Optional[int],
+    output: Optional[str],
+):
+    new_client, new_authdata, new_att = client_b64, authdata_b64, att_b64
+
+    # --- clientDataJSON modifications ---
+    if client_b64 and (set_origin or set_challenge):
+        cdj = decode_client(client_b64)
+
+        if set_origin:
+            print(
+                f"[clientDataJSON] origin: {cdj.get('origin')} -> {set_origin}",
+                file=sys.stderr,
+            )
+            cdj["origin"] = set_origin
+
+        if set_challenge:
+            if set_challenge.lower() == "random":
+                rand = os.urandom(32)
+                new_chal = b64url_encode(rand)
+            else:
+                new_chal = set_challenge
+            print(
+                f"[clientDataJSON] challenge replaced with {new_chal}",
+                file=sys.stderr,
+            )
+            cdj["challenge"] = new_chal
+
+        new_client = encode_client(cdj)
+
+    # --- authenticatorData modifications ---
+    if authdata_b64 and (
+        clear_up
+        or set_up
+        or clear_uv
+        or set_uv
+        or counter is not None
+        or set_rpid
+    ):
+        ad = decode_authdata(authdata_b64)
+        orig_flags, orig_counter = ad.flags, ad.counter
+
+        if clear_up:
+            ad.flags &= ~FLAG_UP
+        if set_up:
+            ad.flags |= FLAG_UP
+        if clear_uv:
+            ad.flags &= ~FLAG_UV
+        if set_uv:
+            ad.flags |= FLAG_UV
+        if counter is not None:
+            ad.counter = counter
+        if set_rpid:
+            new_hash = hashlib.sha256(set_rpid.encode("utf-8")).digest()
+            print(
+                f"[authenticatorData] rpIdHash: {ad.rp_hash.hex()} -> {new_hash.hex()}",
+                file=sys.stderr,
+            )
+            ad.rp_hash = new_hash
+
+        if (orig_flags != ad.flags) or (orig_counter != ad.counter):
+            print(
+                f"[authenticatorData] flags 0x{orig_flags:02x}->{ad.flags:02x}, "
+                f"counter {orig_counter}->{ad.counter}",
+                file=sys.stderr,
+            )
+
+        new_authdata = encode_authdata(ad)
+
+    # --- attestationObject update if needed ---
+    if att_b64 and new_authdata != authdata_b64:
+        ao = decode_attobj(att_b64)
+        ao["authData"] = b64url_decode(new_authdata)
+        new_att = encode_attobj(ao)
+
+    # --- build output payload ---
+    kv = []
+    if new_client:
+        kv.append(f"clientDataJSON={new_client}")
+    if new_authdata:
+        kv.append(f"authenticatorData={new_authdata}")
+    if new_att:
+        kv.append(f"attestationObject={new_att}")
+
+    payload = "&".join(kv)
+    if output:
+        with open(output, "w", encoding="utf-8") as fout:
+            fout.write(payload)
+        print(f"[+] payload written to {output}", file=sys.stderr)
+    else:
+        print(payload)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Self‑test suite
+# ─────────────────────────────────────────────────────────────────────
+def selftest():
+    ok = True
+    # Base64URL round‑trip
+    s = "aGVsbG8gd29ybGQ"
+    ok &= b64url_encode(b64url_decode(s)) == s
+
+    # Flag operations
+    dummy = b"\0" * 32 + b"\x05" + b"\0\0\0\x02"
+    ad = decode_authdata(b64url_encode(dummy))
+    ad.flags &= ~FLAG_UP
+    ok &= not (decode_authdata(encode_authdata(ad)).flags & FLAG_UP)
+
+    # rpIdHash replacement
+    ad2 = decode_authdata(b64url_encode(dummy))
+    new_hash = hashlib.sha256(b"evil.example").digest()
+    ad2.rp_hash = new_hash
+    ok &= decode_authdata(encode_authdata(ad2)).rp_hash == new_hash
+
+    # challenge random
+    rand = os.urandom(32)
+    chal = b64url_encode(rand)
+    ok &= len(chal) > 0 and "=" not in chal
+
+    print("[SELFTEST] OK" if ok else "[SELFTEST] FAIL", file=sys.stderr)
+    sys.exit(0 if ok else 1)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Argument parsing & entry point
+# ─────────────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser("WebAuthn message modifier")
+    ap.add_argument("--client", help="Base64URL clientDataJSON")
+    ap.add_argument("--authdata", help="Base64URL authenticatorData")
+    ap.add_argument("--attobj", help="Base64URL attestationObject (registration only)")
+
+    ap.add_argument("--set-origin", help="Rewrite clientDataJSON.origin")
+    ap.add_argument(
+        "--set-challenge",
+        help='Rewrite clientDataJSON.challenge '
+        '(pass "random" for 32‑byte random value or Base64URL string)',
+    )
+    ap.add_argument(
+        "--set-rpid",
+        help="Set RP ID string and rewrite authenticatorData.rpIdHash (SHA‑256)",
+    )
+
+    ap.add_argument("--clear-UP", action="store_true", help="Clear UserPresence bit")
+    ap.add_argument("--set-UP", action="store_true", help="Set UserPresence bit")
+    ap.add_argument("--clear-UV", action="store_true", help="Clear UserVerification bit")
+    ap.add_argument("--set-UV", action="store_true", help="Set UserVerification bit")
+    ap.add_argument("--counter", type=int, help="Overwrite signatureCounter")
+    ap.add_argument("--output", help="Write modified payload to file")
+    ap.add_argument("--selftest", action="store_true", help="Run self‑tests and exit")
+
+    args = ap.parse_args()
+
+    if args.selftest:
+        selftest()
+
+    if not (args.client or args.authdata or args.attobj):
+        ap.error("at least one of --client / --authdata / --attobj is required")
+
+    modify(
+        client_b64=args.client,
+        authdata_b64=args.authdata,
+        att_b64=args.attobj,
+        set_origin=args.set_origin,
+        set_challenge=args.set_challenge,
+        set_rpid=args.set_rpid,
+        clear_up=args.clear_UP,
+        set_up=args.set_UP,
+        clear_uv=args.clear_UV,
+        set_uv=args.set_UV,
+        counter=args.counter,
+        output=args.output,
+    )
+
+
+if __name__ == "__main__":
+    main()
+###############################################################################
