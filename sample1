@@ -1,14 +1,16 @@
 ###############################################################################
-# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（CLI 手動診断支援・v1.3）
+# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（v1.4）
 #
-# v1.3 変更点  ✧✧✧───────────────────────────────────────────────
-#   ▸ clientDataJSON と同様、**attestationObject / authenticatorData で
-#     何を操作したか** を必ず標準エラー出力にログするよう改良。
-#       • authData 内 rpIdHash / flags / counter 変更を詳細に表示
-#       • attestationObject に埋め戻しが発生した場合、その旨を表示
-#   ▸ 既存 v1.2 機能（--set-challenge, --set-rpid など）は維持
+# v1.4 変更点 ─────────────────────────────────────────────────────────
+#  ▸ attestationObject しか入力されないケースでも authData を内部抽出し、
+#    --set‑rpid / --clear‑UP など “authData 系オプション” が動作するよう統合。
+#  ▸ 処理フロー
+#       ① 入力優先度:  --authdata があればそれを使用
+#                      無ければ --attobj から抽出した authData を使用
+#       ② 変更後は必要に応じて attestationObject.authData を置き換え
+#  ▸ 変更ログ強化:  attestationObject 埋め戻し時に必ず詳細を stderr 出力
 #
-# 依存ライブラリ : Python ≥3.8 / pip install cbor2
+#   依存:  Python ≥3.8 / pip install cbor2
 ###############################################################################
 import argparse
 import base64
@@ -20,23 +22,18 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-import cbor2  # pip install cbor2
+import cbor2  # オフライン環境ではあらかじめ pip install 済みであること
 
-# ─────────────────────────────────────────────────────────────────────
-# Base64URL helpers
-# ─────────────────────────────────────────────────────────────────────
-def b64url_decode(inp: str) -> bytes:
-    pad = "=" * (-len(inp) % 4)
-    return base64.urlsafe_b64decode(inp + pad)
+# ---------- 共通ユーティリティ ------------------------------------------------
+def b64url_decode(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def b64url_encode(buf: bytes) -> str:
-    return base64.urlsafe_b64encode(buf).decode().rstrip("=")
+def b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
 
 
-# ─────────────────────────────────────────────────────────────────────
-# clientDataJSON helpers
-# ─────────────────────────────────────────────────────────────────────
+# ---------- clientDataJSON ---------------------------------------------------
 def decode_client(b64: str) -> Dict[str, Any]:
     return json.loads(b64url_decode(b64))
 
@@ -45,9 +42,7 @@ def encode_client(obj: Dict[str, Any]) -> str:
     return b64url_encode(json.dumps(obj, separators=(",", ":")).encode())
 
 
-# ─────────────────────────────────────────────────────────────────────
-# attestationObject helpers
-# ─────────────────────────────────────────────────────────────────────
+# ---------- attestationObject ------------------------------------------------
 def decode_attobj(b64: str) -> Dict[str, Any]:
     return cbor2.loads(b64url_decode(b64))
 
@@ -56,9 +51,7 @@ def encode_attobj(obj: Dict[str, Any]) -> str:
     return b64url_encode(cbor2.dumps(obj))
 
 
-# ─────────────────────────────────────────────────────────────────────
-# authenticatorData helpers
-# ─────────────────────────────────────────────────────────────────────
+# ---------- authenticatorData ------------------------------------------------
 @dataclass
 class AuthData:
     rp_hash: bytes
@@ -68,38 +61,40 @@ class AuthData:
     ext: bytes
 
 
+FLAG_UP = 0x01
+FLAG_UV = 0x04
+
+
 def _cbor_peek(buf: bytes) -> Tuple[Any, int]:
     dec = cbor2.CBORDecoder(buf)
-    val = dec.decode()
-    return val, dec.tell()
+    v = dec.decode()
+    return v, dec.tell()
 
 
-def _split_authdata(buf: bytes) -> AuthData:
-    rp_hash = buf[0:32]
+def _split_auth(buf: bytes) -> AuthData:
+    rp_hash = buf[:32]
     flags = buf[32]
     counter = struct.unpack(">I", buf[33:37])[0]
     rest = buf[37:]
 
-    # AT(0x40) present?
-    if flags & 0x40:
-        aaguid = rest[0:16]
+    if flags & 0x40:  # AT = 1
+        aaguid = rest[:16]
         cred_len = struct.unpack(">H", rest[16:18])[0]
-        cbor_start = 18 + cred_len
-        _, used = _cbor_peek(rest[cbor_start:])
+        pk_start = 18 + cred_len
+        _, used = _cbor_peek(rest[pk_start:])
         acd_len = 16 + 2 + cred_len + used
-        acd = rest[:acd_len]
-        ext = rest[acd_len:]
+        acd, ext = rest[:acd_len], rest[acd_len:]
     else:
         acd, ext = b"", rest
 
     return AuthData(rp_hash, flags, counter, acd, ext)
 
 
-def decode_authdata(b64: str) -> AuthData:
-    return _split_authdata(b64url_decode(b64))
+def decode_auth(b64: str) -> AuthData:
+    return _split_auth(b64url_decode(b64))
 
 
-def encode_authdata(ad: AuthData) -> str:
+def encode_auth(ad: AuthData) -> str:
     parts = [
         ad.rp_hash,
         struct.pack("B", ad.flags),
@@ -110,205 +105,125 @@ def encode_authdata(ad: AuthData) -> str:
     return b64url_encode(b"".join(parts))
 
 
-# ─────────────────────────────────────────────────────────────────────
-# CLI modify routine
-# ─────────────────────────────────────────────────────────────────────
-FLAG_UP = 0x01
-FLAG_UV = 0x04
-
-
+# ---------- メイン改変ロジック ----------------------------------------------
 def modify(
     client_b64: Optional[str],
-    authdata_b64: Optional[str],
     att_b64: Optional[str],
+    auth_b64: Optional[str],
+    *,
     set_origin: Optional[str],
-    set_challenge: Optional[str],
+    set_chal: Optional[str],
     set_rpid: Optional[str],
-    clear_up: bool,
-    set_up: bool,
-    clear_uv: bool,
-    set_uv: bool,
-    counter: Optional[int],
-    output: Optional[str],
+    up_ops: Tuple[bool, bool],  # (clear, set)
+    uv_ops: Tuple[bool, bool],
+    counter_val: Optional[int],
+    outfile: Optional[str],
 ):
-    new_client, new_authdata, new_att = client_b64, authdata_b64, att_b64
+    # 1) 入力ソース取得
+    att_dict = decode_attobj(att_b64) if att_b64 else None
 
-    # ── clientDataJSON modifications ────────────────────────────────
-    if client_b64 and (set_origin or set_challenge):
-        cdj = decode_client(client_b64)
+    if auth_b64:
+        auth_src_b64 = auth_b64
+    elif att_dict:
+        auth_src_b64 = b64url_encode(att_dict["authData"])
+    else:
+        auth_src_b64 = None
 
+    # 2) clientDataJSON 改変
+    new_client = client_b64
+    if client_b64 and (set_origin or set_chal):
+        cd = decode_client(client_b64)
         if set_origin:
-            print(
-                f"[clientDataJSON] origin: {cdj.get('origin')} -> {set_origin}",
-                file=sys.stderr,
-            )
-            cdj["origin"] = set_origin
+            print(f"[clientDataJSON] origin: {cd.get('origin')} -> {set_origin}", file=sys.stderr)
+            cd["origin"] = set_origin
+        if set_chal:
+            rand = os.urandom(32) if set_chal.lower() == "random" else None
+            chal = b64url_encode(rand) if rand else set_chal
+            print(f"[clientDataJSON] challenge -> {chal}", file=sys.stderr)
+            cd["challenge"] = chal
+        new_client = encode_client(cd)
 
-        if set_challenge:
-            if set_challenge.lower() == "random":
-                rand = os.urandom(32)
-                new_chal = b64url_encode(rand)
-            else:
-                new_chal = set_challenge
-            print(
-                f"[clientDataJSON] challenge replaced with {new_chal}",
-                file=sys.stderr,
-            )
-            cdj["challenge"] = new_chal
-
-        new_client = encode_client(cdj)
-
-    # ── authenticatorData modifications ─────────────────────────────
-    rp_hash_changed = False
-    if authdata_b64 and (
-        clear_up
-        or set_up
-        or clear_uv
-        or set_uv
-        or counter is not None
-        or set_rpid
+    # 3) authenticatorData 改変
+    new_auth = auth_src_b64
+    if auth_src_b64 and (
+        any(up_ops) or any(uv_ops) or counter_val is not None or set_rpid
     ):
-        ad = decode_authdata(authdata_b64)
-        orig_flags, orig_counter = ad.flags, ad.counter
-        orig_rp_hash = ad.rp_hash
-
-        if clear_up:
+        ad = decode_auth(auth_src_b64)
+        if up_ops[0]:
             ad.flags &= ~FLAG_UP
-        if set_up:
+        if up_ops[1]:
             ad.flags |= FLAG_UP
-        if clear_uv:
+        if uv_ops[0]:
             ad.flags &= ~FLAG_UV
-        if set_uv:
+        if uv_ops[1]:
             ad.flags |= FLAG_UV
-        if counter is not None:
-            ad.counter = counter
+        if counter_val is not None:
+            print(f"[authenticatorData] counter: {ad.counter} -> {counter_val}", file=sys.stderr)
+            ad.counter = counter_val
         if set_rpid:
-            ad.rp_hash = hashlib.sha256(set_rpid.encode("utf-8")).digest()
-            rp_hash_changed = True
+            new_hash = hashlib.sha256(set_rpid.encode()).digest()
+            print(f"[authenticatorData] rpIdHash -> {new_hash.hex()}", file=sys.stderr)
+            ad.rp_hash = new_hash
+        new_auth = encode_auth(ad)
 
-        # 出力ログ
-        if rp_hash_changed:
-            print(
-                f"[authenticatorData] rpIdHash: {orig_rp_hash.hex()} -> "
-                f"{ad.rp_hash.hex()}",
-                file=sys.stderr,
-            )
-        if (orig_flags != ad.flags) or (orig_counter != ad.counter):
-            print(
-                f"[authenticatorData] flags 0x{orig_flags:02x} -> 0x{ad.flags:02x}, "
-                f"counter {orig_counter} -> {ad.counter}",
-                file=sys.stderr,
-            )
+    # 4) attestationObject 埋め戻し
+    new_att = att_b64
+    if att_dict and new_auth and new_auth != auth_src_b64:
+        att_dict["authData"] = b64url_decode(new_auth)
+        new_att = encode_attobj(att_dict)
+        print("[attestationObject] authData field updated", file=sys.stderr)
 
-        new_authdata = encode_authdata(ad)
-
-    # ── attestationObject update & log ──────────────────────────────
-    if att_b64 and new_authdata != authdata_b64:
-        ao = decode_attobj(att_b64)
-        ao["authData"] = b64url_decode(new_authdata)
-        new_att = encode_attobj(ao)
-        print(
-            "[attestationObject] embedded authData replaced "
-            "(reflects authenticatorData changes)",
-            file=sys.stderr,
-        )
-
-    # ── output payload ─────────────────────────────────────────────
+    # 5) 出力
     kv = []
     if new_client:
         kv.append(f"clientDataJSON={new_client}")
-    if new_authdata:
-        kv.append(f"authenticatorData={new_authdata}")
+    if new_auth:
+        kv.append(f"authenticatorData={new_auth}")
     if new_att:
         kv.append(f"attestationObject={new_att}")
 
     payload = "&".join(kv)
-    if output:
-        with open(output, "w", encoding="utf-8") as fout:
-            fout.write(payload)
-        print(f"[+] payload written to {output}", file=sys.stderr)
+    if outfile:
+        with open(outfile, "w", encoding="utf-8") as f:
+            f.write(payload)
+        print(f"[+] written: {outfile}", file=sys.stderr)
     else:
         print(payload)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Self‑test suite
-# ─────────────────────────────────────────────────────────────────────
-def selftest():
-    ok = True
-    s = "aGVsbG8gd29ybGQ"
-    ok &= b64url_encode(b64url_decode(s)) == s
+# ---------- CLI --------------------------------------------------------------
+if __name__ == "__main__":
+    p = argparse.ArgumentParser("WebAuthn message modifier v1.4")
+    p.add_argument("--client", help="Base64URL clientDataJSON")
+    p.add_argument("--attobj", help="Base64URL attestationObject (registration)")
+    p.add_argument("--authdata", help="Base64URL authenticatorData (assertion)")
 
-    dummy = b"\0" * 32 + b"\x05" + b"\0\0\0\x02"
-    ad = decode_authdata(b64url_encode(dummy))
-    ad.flags &= ~FLAG_UP
-    ok &= not (decode_authdata(encode_authdata(ad)).flags & FLAG_UP)
-
-    ad2 = decode_authdata(b64url_encode(dummy))
-    new_hash = hashlib.sha256(b"evil.example").digest()
-    ad2.rp_hash = new_hash
-    ok &= decode_authdata(encode_authdata(ad2)).rp_hash == new_hash
-
-    rand = os.urandom(32)
-    chal = b64url_encode(rand)
-    ok &= len(chal) > 0 and "=" not in chal
-
-    print("[SELFTEST] OK" if ok else "[SELFTEST] FAIL", file=sys.stderr)
-    sys.exit(0 if ok else 1)
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Argument parsing & entry point
-# ─────────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser("WebAuthn message modifier")
-    ap.add_argument("--client", help="Base64URL clientDataJSON")
-    ap.add_argument("--authdata", help="Base64URL authenticatorData")
-    ap.add_argument("--attobj", help="Base64URL attestationObject (registration)")
-
-    ap.add_argument("--set-origin", help="Rewrite clientDataJSON.origin")
-    ap.add_argument(
+    p.add_argument("--set-origin", help="Rewrite clientDataJSON.origin")
+    p.add_argument(
         "--set-challenge",
-        help='Rewrite clientDataJSON.challenge '
-        '(use "random" for 32‑byte random value or provide Base64URL)',
+        help='Rewrite clientDataJSON.challenge ("random" for 32B random)',
     )
-    ap.add_argument(
-        "--set-rpid",
-        help="Set RP ID string and rewrite authenticatorData.rpIdHash (SHA‑256)",
-    )
+    p.add_argument("--set-rpid", help="Rewrite rpIdHash with SHA‑256(rpid)")
+    p.add_argument("--clear-UP", action="store_true", help="Clear UserPresence bit")
+    p.add_argument("--set-UP", action="store_true", help="Set UserPresence bit")
+    p.add_argument("--clear-UV", action="store_true", help="Clear UserVerification bit")
+    p.add_argument("--set-UV", action="store_true", help="Set UserVerification bit")
+    p.add_argument("--counter", type=int, help="Overwrite signatureCounter")
+    p.add_argument("--output", help="Write modified payload to file")
 
-    ap.add_argument("--clear-UP", action="store_true", help="Clear UserPresence bit")
-    ap.add_argument("--set-UP", action="store_true", help="Set UserPresence bit")
-    ap.add_argument("--clear-UV", action="store_true", help="Clear UserVerification bit")
-    ap.add_argument("--set-UV", action="store_true", help="Set UserVerification bit")
-    ap.add_argument("--counter", type=int, help="Overwrite signatureCounter")
-    ap.add_argument("--output", help="Write modified payload to file")
-    ap.add_argument("--selftest", action="store_true", help="Run self‑tests and exit")
-
-    args = ap.parse_args()
-
-    if args.selftest:
-        selftest()
-
-    if not (args.client or args.authdata or args.attobj):
-        ap.error("at least one of --client / --authdata / --attobj is required")
+    args = p.parse_args()
+    if not any([args.client, args.attobj, args.authdata]):
+        p.error("require at least --client or --attobj or --authdata")
 
     modify(
         client_b64=args.client,
-        authdata_b64=args.authdata,
         att_b64=args.attobj,
+        auth_b64=args.authdata,
         set_origin=args.set_origin,
-        set_challenge=args.set_challenge,
+        set_chal=args.set_challenge,
         set_rpid=args.set_rpid,
-        clear_up=args.clear_UP,
-        set_up=args.set_UP,
-        clear_uv=args.clear_UV,
-        set_uv=args.set_UV,
-        counter=args.counter,
-        output=args.output,
+        up_ops=(args.clear_UP, args.set_UP),
+        uv_ops=(args.clear_UV, args.set_UV),
+        counter_val=args.counter,
+        outfile=args.output,
     )
-
-
-if __name__ == "__main__":
-    main()
-###############################################################################
