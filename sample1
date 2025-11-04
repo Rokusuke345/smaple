@@ -1,254 +1,188 @@
-###############################################################################
-# modify_webauthn.py  ―  WebAuthn メッセージ改変ツール（v1.6）
-#
-# v1.6 変更点
-#   • _cbor_peek() で CBORDecoder.tell() を使わず、BytesIO の .tell() で
-#     消費バイト長を取得するよう修正（AttributeError 解消）
-#   • selftest() を再整備し、Base64URL／flag 操作／rpIdHash 置換を確認
-#
-#   依存: Python ≥3.8 / pip install cbor2
-###############################################################################
-import argparse
-import base64
-import hashlib
-import io
-import json
-import os
-import struct
-import sys
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+# 下期目標（2025年）
 
-import cbor2
+---
 
-# ---------- Base64URL --------------------------------------------------------
-def b64url_decode(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+# 1. Web刷新プロジェクトの正式リリース準備（PoC運用と体制整備）
 
+## 大目標のゴール
+正式リリース判断に必要な運用実績・技術検証結果・改善データを収集・整理する。  
+同時に、運用・保守タスクを体系化し、リリース後に安定運用が可能な状態を構築する。  
+経営判断を支える「定量的な根拠」と「再現性のある運用基盤」の確立を目指す。
 
-def b64url_encode(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+- **KGI**：リリース判断に必要な技術・運用データを揃え、正式リリースに向けた運用基盤を確立する  
+- **KPI**：  
+　・PoC運用案件 3件以上を完遂  
+　・稼働データ・障害対応・運用効率に関する指標を定量的に可視化  
+　・改善提案リスト（技術・運用）を10件以上抽出・整理し、うち7件以上をタスク化して進捗管理へ移行  
 
+---
 
-# ---------- clientDataJSON ---------------------------------------------------
-def decode_client(b64: str) -> Dict[str, Any]:
-    return json.loads(b64url_decode(b64))
+## 小目標
 
+### 1-1. PoC運用によるデータ収集と安定性評価
+PoC環境で運用を実施し、システム安定性・運用性・対応効率のデータを収集する。  
+得られたデータをもとに、正式リリースに向けたリスク・改善方針を明確化する。
 
-def encode_client(obj: Dict[str, Any]) -> str:
-    return b64url_encode(json.dumps(obj, separators=(",", ":")).encode())
+- **KGI**：PoC運用結果を整理し、「安定性評価レポート」を完成させる  
+- **KPI**：  
+　・PoC運用 3件以上完了  
+　・稼働データ（稼働率・応答時間・エラー発生率など）を指標化  
+　・改善提案 10件以上抽出  
+　・PoCごとの運用記録・課題報告書を3件作成  
+　・PoC評価項目の標準化（次案件流用）1件以上  
 
+---
 
-# ---------- attestationObject ------------------------------------------------
-def decode_attobj(b64: str) -> Dict[str, Any]:
-    return cbor2.loads(b64url_decode(b64))
+### 1-2. 運用・保守タスクの標準化と体制整備
+運用・保守フェーズを見据え、タスク体系・実行手順・記録方法を標準化する。  
+誰が運用しても安定稼働を維持できるような「運用の再現性」を確保する。
 
+- **KGI**：運用・保守タスク体系を完成させ、運用体制を確立する  
+- **KPI**：  
+　・運用タスク一覧（監視・障害対応・更新など）を100%整理  
+　・タスク実施記録テンプレートを整備・社内共有  
+　・PoC期間中のタスク実行率 95%以上  
+　・運用引継ぎマニュアルを1式完成  
 
-def encode_attobj(obj: Dict[str, Any]) -> str:
-    return b64url_encode(cbor2.dumps(obj))
+---
 
+### 1-3. 品質・運用改善のタスク化と実行管理
+PoCで得られた課題・提案をPlannerなどのタスク管理ツールに落とし込み、実施状況を可視化・運用する。  
+改善活動を継続的に回すことで、品質・運用両面の最適化を図る。
 
-# ---------- authenticatorData ------------------------------------------------
-@dataclass
-class AuthData:
-    rp_hash: bytes
-    flags: int
-    counter: int
-    acd: bytes
-    ext: bytes
+- **KGI**：改善提案をタスク化し、実行管理を行える状態を構築（Planner運用ベース）  
+- **KPI**：  
+　・改善タスク 10件以上登録・進捗管理開始  
+　・改善タスクの実施率 70%以上  
+　・PoC比較で稼働率・応答性能などの指標を10%以上改善  
+　・月次で改善レビューを3回以上実施  
 
+---
 
-FLAG_UP = 0x01
-FLAG_UV = 0x04
+# 2. OJTを通じた主体性育成と組織貢献人材の形成（経験重視）
 
+## 大目標のゴール
+既存のOJT計画に基づき、対象者に多様な経験を積ませることで、診断業務を中心に幅広い業務領域へ関心と行動を広げられるよう支援する。  
+育成の方向性をフォローしつつ、学習機会・挑戦機会を適切に提供し、自律的な成長を促す。
 
-def _cbor_peek(buf: bytes) -> Tuple[Any, int]:
-    """
-    Decode the first CBOR element in `buf` and return (value, consumed_length).
-    Uses BytesIO.tell() to measure consumed bytes (decoder.tell() is unavailable
-    in some cbor2 versions).
-    """
-    bio = io.BytesIO(buf)
-    val = cbor2.load(bio)
-    consumed = bio.tell()
-    return val, consumed
+- **KGI**：OJT計画に基づき、対象者が多様な実務経験を通して自律的に行動できる状態を作るための支援体制を確立  
+- **KPI**：  
+　・OJT計画で設定したフェーズの実施率 100%  
+　・案件・タスクの実践機会を5件以上提供  
+　・フォローアップおよびレビュー **隔日で実施（稼働日ベース）**  
+　・経験ログ（案件内容・学び・課題）を全期間で記録  
 
+---
 
-def _split_auth(buf: bytes) -> AuthData:
-    rp_hash = buf[:32]
-    flags = buf[32]
-    counter = struct.unpack(">I", buf[33:37])[0]
-    rest = buf[37:]
+## 小目標
 
-    if flags & 0x40:  # AT = 1
-        aaguid = rest[:16]
-        cred_len = struct.unpack(">H", rest[16:18])[0]
-        pk_start = 18 + cred_len
-        _, used = _cbor_peek(rest[pk_start:])
-        acd_len = 16 + 2 + cred_len + used
-        acd, ext = rest[:acd_len], rest[acd_len:]
-    else:
-        acd, ext = b"", rest
+### 2-1. 多様な実務経験の機会提供とフォロー
+対象者が診断実務・運用支援・提案補助など複数領域で経験を積めるよう、案件アサインや支援を調整する。  
+実務を通じて課題発見・仮説検証の流れを体感させる。
 
-    return AuthData(rp_hash, flags, counter, acd, ext)
+- **KGI**：対象者に多領域での実務経験を提供し、計画内での全工程経験を完了  
+- **KPI**：  
+　・案件同行・担当フェーズを含むOJT機会 5件以上  
+　・案件ごとのフィードバック記録 100%作成  
+　・対象者が関与した領域（診断／改善／資料作成など）3種以上  
+　・フォローアップおよびレビューを**隔日で実施（稼働日ベース）**
 
+---
 
-def decode_auth(b64: str) -> AuthData:
-    return _split_auth(b64url_decode(b64))
+### 2-2. 成長促進と自省支援
+経験を通じた学びを定期的に振り返り、自己課題の設定と改善提案に繋げる。  
+育成者として、対象者の気づき・思考整理をサポートする仕組みを整備する。
 
+- **KGI**：対象者が経験を通じて課題発見・改善提案を行える状態を確立  
+- **KPI**：  
+　・案件振り返り・改善提案ログ 3件以上記録  
+　・OJT終盤に振り返りセッション実施  
+　・育成プロセス上の改善点を1件以上反映  
+　・対象者からのフィードバックを収集し、次期モデルへ反映  
 
-def encode_auth(ad: AuthData) -> str:
-    joined = (
-        ad.rp_hash
-        + struct.pack("B", ad.flags)
-        + struct.pack(">I", ad.counter)
-        + ad.acd
-        + ad.ext
-    )
-    return b64url_encode(joined)
+---
 
+# 3. イレギュラー案件対応力の強化と属人化解消
 
-# ---------- modify -----------------------------------------------------------
-def modify(
-    client_b64: Optional[str],
-    att_b64: Optional[str],
-    auth_b64: Optional[str],
-    *,
-    set_origin: Optional[str],
-    set_chal: Optional[str],
-    set_rpid: Optional[str],
-    up_ops: Tuple[bool, bool],
-    uv_ops: Tuple[bool, bool],
-    counter_val: Optional[int],
-    outfile: Optional[str],
-):
-    # --- prepare sources -----------------------------------------------------
-    att_dict = decode_attobj(att_b64) if att_b64 else None
-    auth_src_b64 = auth_b64 or (b64url_encode(att_dict["authData"]) if att_dict else None)
+## 大目標のゴール
+特殊技術や複雑構成を含むイレギュラー案件への対応を特定メンバーに依存させず、チーム全体で再現できる体制を構築する。  
+案件を通じたリアルな学習機会を設け、後輩育成と知見共有を同時に進める。
 
-    # --- clientDataJSON modifications ---------------------------------------
-    new_client = client_b64
-    if client_b64 and (set_origin or set_chal):
-        cd = decode_client(client_b64)
-        if set_origin:
-            print(f"[clientDataJSON] origin: {cd.get('origin')} -> {set_origin}", file=sys.stderr)
-            cd["origin"] = set_origin
-        if set_chal:
-            chal_val = (
-                b64url_encode(os.urandom(32)) if set_chal.lower() == "random" else set_chal
-            )
-            print(f"[clientDataJSON] challenge -> {chal_val}", file=sys.stderr)
-            cd["challenge"] = chal_val
-        new_client = encode_client(cd)
+- **KGI**：イレギュラー案件対応を独立して実施できるメンバーを2名以上育成し、チーム内で再現可能な体制を確立  
+- **KPI**：  
+　・イレギュラー案件対応を共同で実施（同行含む）3件以上  
+　・後輩メンバーを同行させた案件 2件以上  
+　・知見共有会または振り返り会を2回以上実施  
+　・対応内容・検討プロセスをナレッジ化し、チーム内共有率100%  
+　・再現対応（他メンバーが独立して対応）1件以上確認  
 
-    # --- authenticatorData modifications ------------------------------------
-    new_auth = auth_src_b64
-    if auth_src_b64 and (
-        any(up_ops) or any(uv_ops) or counter_val is not None or set_rpid
-    ):
-        ad = decode_auth(auth_src_b64)
+---
 
-        if up_ops[0]:
-            ad.flags &= ~FLAG_UP
-        if up_ops[1]:
-            ad.flags |= FLAG_UP
-        if uv_ops[0]:
-            ad.flags &= ~FLAG_UV
-        if uv_ops[1]:
-            ad.flags |= FLAG_UV
-        if counter_val is not None:
-            print(f"[authenticatorData] counter {ad.counter} -> {counter_val}", file=sys.stderr)
-            ad.counter = counter_val
-        if set_rpid:
-            new_hash = hashlib.sha256(set_rpid.encode()).digest()
-            print(f"[authenticatorData] rpIdHash -> {new_hash.hex()}", file=sys.stderr)
-            ad.rp_hash = new_hash
+## 小目標
 
-        new_auth = encode_auth(ad)
+### 3-1. イレギュラー案件の知見共有とチーム内展開
+イレギュラー案件対応のプロセスや判断の裏側を整理し、チーム内で共有・再現可能な形に落とし込む。  
+実際の案件経験をベースに、ノウハウを「見て学ぶ」「使って試す」形で展開する。
 
-    # --- attestationObject update -------------------------------------------
-    new_att = att_b64
-    if att_dict and new_auth and new_auth != auth_src_b64:
-        att_dict["authData"] = b64url_decode(new_auth)
-        new_att = encode_attobj(att_dict)
-        print("[attestationObject] authData updated", file=sys.stderr)
+- **KGI**：チームメンバー全員がイレギュラー案件対応の流れを理解し、参照可能なナレッジを整備  
+- **KPI**：  
+　・案件同行・レビューを通じたOJT実施 2名以上  
+　・対応内容のナレッジ共有（技術＋営業的視点）3件以上  
+　・共有会・振り返り会 実施2回以上  
+　・共有後に他メンバーが再現対応 1件以上  
 
-    # --- output --------------------------------------------------------------
-    kv = []
-    if new_client:
-        kv.append(f"clientDataJSON={new_client}")
-    if new_auth:
-        kv.append(f"authenticatorData={new_auth}")
-    if new_att:
-        kv.append(f"attestationObject={new_att}")
+---
 
-    payload = "&".join(kv)
-    if outfile:
-        with open(outfile, "w", encoding="utf-8") as f:
-            f.write(payload)
-        print(f"[+] written: {outfile}", file=sys.stderr)
-    else:
-        print(payload)
+### 3-2. 実践を通じた育成とフォローアップ
+実際の案件対応を通じて、後輩が問題解決のプロセスを体験・習得できるよう支援する。  
+フォローアップでは、技術的観点だけでなく“判断・顧客対応”まで含めて振り返る。
 
+- **KGI**：後輩がイレギュラー案件対応プロセスを理解し、部分的に主導できる状態を確立  
+- **KPI**：  
+　・同行支援案件 2件以上  
+　・フォローアップレビューを全案件で実施  
+　・案件終了後に学び・改善点を共有 3件以上  
+　・対象者からのフィードバックを収集・反映 1件以上  
 
-# ---------- self‑test --------------------------------------------------------
-def selftest() -> bool:
-    ok = True
-    # Base64URL roundtrip
-    s = "aGVsbG8gd29ybGQ"
-    ok &= b64url_encode(b64url_decode(s)) == s
+---
 
-    # flag manipulation
-    dummy = b"\0" * 32 + b"\x05" + b"\0\0\0\x02"
-    ad = decode_auth(b64url_encode(dummy))
-    ad.flags &= ~FLAG_UP
-    ok &= not (decode_auth(encode_auth(ad)).flags & FLAG_UP)
+# 4. AI活用基盤の定着化と推進フェーズへの移行
 
-    # rpIdHash replace
-    ad2 = decode_auth(b64url_encode(dummy))
-    new_hash = hashlib.sha256(b"evil.example").digest()
-    ad2.rp_hash = new_hash
-    ok &= decode_auth(encode_auth(ad2)).rp_hash == new_hash
+## 大目標のゴール
+リリース済みのAI活用基盤を実業務レベルで浸透させ、活用定着を実現する。  
+各プロジェクトへの伴走支援と、誰でも簡単に使える技術的導線の整備を両輪として、業務の中で自然にAIが使われる状態を作る。
 
-    return ok
+- **KGI**：各プロジェクトでAI基盤を活用している事例を5件以上創出し、継続的な利用が定着した状態を実現  
+- **KPI**：  
+　・AI活用推進を実施したPJ数：5件以上  
+　・PJ内でのAI活用継続率：60%以上  
+　・AI活用支援（技術整備・伴走含む）フィードバック 10件以上  
+　・利用頻度・活用テーマなどの定量レポートを四半期ごとに作成  
 
+---
 
-# ---------- CLI --------------------------------------------------------------
-if __name__ == "__main__":
-    if not selftest():
-        print("[SELFTEST] FAIL", file=sys.stderr)
-        sys.exit(1)
-    print("[SELFTEST] OK", file=sys.stderr)
+## 小目標
 
-    ap = argparse.ArgumentParser("WebAuthn message modifier v1.6")
-    ap.add_argument("--client")
-    ap.add_argument("--attobj")
-    ap.add_argument("--authdata")
+### 4-1. プロジェクト伴走によるAI活用推進
+各PJに入り込み、業務課題に沿ったAI活用の具体化を支援する。  
+PoC的支援ではなく、実務での定常利用に繋げるための伴走・チューニング・フォローアップを実施する。
 
-    ap.add_argument("--set-origin")
-    ap.add_argument("--set-challenge")
-    ap.add_argument("--set-rpid")
+- **KGI**：AI活用がPJ内で定常化し、成果（時間短縮・品質向上など）を確認できる状態を複数創出  
+- **KPI**：  
+　・AI活用伴走PJ数：5件以上  
+　・PJごとの活用テーマ（例：報告書自動化、テキスト要約など）明確化率 100%  
+　・活用継続率：60%以上  
+　・各PJでの成果（定量効果）を記録・共有  
 
-    ap.add_argument("--clear-UP", action="store_true")
-    ap.add_argument("--set-UP", action="store_true")
-    ap.add_argument("--clear-UV", action="store_true")
-    ap.add_argument("--set-UV", action="store_true")
-    ap.add_argument("--counter", type=int)
-    ap.add_argument("--output")
+---
 
-    args = ap.parse_args()
-    if not any([args.client, args.attobj, args.authdata]):
-        ap.error("need --client or --attobj or --authdata")
+### 4-2. 簡易導入環境の整備と拡張
+OpenUIやDify環境などを活用し、誰でもすぐに試せる環境を整備する。  
+技術的障壁を下げることで、AI利用を“思いつきで動かせるレベル”に引き上げる。
 
-    modify(
-        client_b64=args.client,
-        att_b64=args.attobj,
-        auth_b64=args.authdata,
-        set_origin=args.set_origin,
-        set_chal=args.set_challenge,
-        set_rpid=args.set_rpid,
-        up_ops=(args.clear_UP, args.set_UP),
-        uv_ops=(args.clear_UV, args.set_UV),
-        counter_val=args.counter,
-        outfile=args.output,
-    )
+- **KGI**：AI環境の導入・利用ハードルを低減し、新規ユーザーの利用を促進  
+- **KPI**：  
+　・OpenUIまたはDify環境の整備・社内利用開始  
+　・簡易利用マニュアル／チュートリアル整備完了  
+　・アクティブ利用者数 10名以上（月1回以上利用）  
+　・利用者フィードバックをもとに改善2サイクル以上実施  
